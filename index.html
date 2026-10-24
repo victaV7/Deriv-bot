@@ -6,191 +6,236 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VIC Synthetic Bot - Stage 1</title>
 <style>
-body{margin:0;background:#101827;color:#eef4ff;font:16px Arial;padding:18px}
+body{margin:0;padding:18px;background:#101827;color:#eef4ff;font:16px Arial}
 h2{color:#57d5ff}
-.card{background:#1c293b;padding:15px;margin:12px 0;border-radius:12px}
-.price{font-size:24px;font-weight:bold;margin:8px 0}
+.card{background:#1c293b;padding:16px;margin:13px 0;border-radius:14px}
+.price{font-size:25px;font-weight:bold;margin:12px 0}
 small{color:#aabbd0}
-button{padding:12px;border:0;border-radius:8px;background:#57d5ff;font-weight:bold}
+button{padding:12px 18px;border:0;border-radius:8px;background:#57d5ff;font-weight:bold}
 #status{color:#ffd166;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
 <h2>VIC SYNTHETIC BOT</h2>
-<p>Stage 1: Deriv market-data connection</p>
+<p>Stage 1: Deriv live market data</p>
+
 <div class="card">
-  Connection: <b id="status">Connecting...</b><br><br>
-  <button onclick="connect()">Reconnect</button>
+Connection: <b id="status">Connecting...</b>
+<p><button onclick="connect()">Reconnect</button></p>
 </div>
+
 <div id="markets"></div>
+
 <div class="card">
-  <b>Symbol discovery</b>
-  <p id="discovery"><small>Waiting for Deriv...</small></p>
+<b>Symbol discovery</b>
+<div id="discovery"><small>Connecting to Deriv...</small></div>
 </div>
+
 <script>
 const ENDPOINT =
-  "wss://api.derivws.com/trading/v1/options/ws/public";
-
-let ws;
-let found = {};
-let subscribed = new Set();
-let requestId = 0;
+ "wss://ws.derivws.com/websockets/v3?app_id=1089";
 
 const targets = [
-  {key:"v75", label:"Volatility 75 Index"},
-  {key:"v25", label:"Volatility 25 Index"},
-  {key:"v10s", label:"Volatility 10 (1s) Index"}
+ {key:"v75",label:"Volatility 75 Index",
+  aliases:["R_75"]},
+ {key:"v25",label:"Volatility 25 Index",
+  aliases:["R_25"]},
+ {key:"v10s",label:"Volatility 10 (1s) Index",
+  aliases:["1HZ10V"]}
 ];
 
-function showStatus(message) {
-  document.getElementById("status").textContent = message;
+let ws=null;
+let found={};
+let timer=null;
+let requestId=0;
+let connected=false;
+
+function render(){
+ document.getElementById("markets").innerHTML=
+ targets.map(t=>`
+ <div class="card">
+ <b>${t.label}</b>
+ <div class="price" id="price-${t.key}">--</div>
+ <div id="detail-${t.key}"><small>Finding symbol...</small></div>
+ </div>`).join("");
 }
 
-function renderCards() {
-  document.getElementById("markets").innerHTML =
-    targets.map(t => {
-      const s = found[t.key];
-      return `<div class="card">
-        <b>${t.label}</b>
-        <div class="price" id="price-${t.key}">--</div>
-        <div id="detail-${t.key}"><small>
-        ${s ? "Symbol: " + s.symbol : "Finding symbol..."}
-        </small></div>
-      </div>`;
-    }).join("");
+function status(s){
+ document.getElementById("status").textContent=s;
 }
 
-function connect() {
-  if (ws) {
-    try { ws.close(); } catch(e) {}
+function connect(){
+ if(timer) clearTimeout(timer);
+ if(ws){
+  ws.onclose=null;
+  try{ws.close()}catch(e){}
+ }
+ found={};
+ connected=false;
+ render();
+ status("Connecting to Deriv...");
+ document.getElementById("discovery").textContent=
+ "Requesting available market symbols...";
+
+ try{
+  ws=new WebSocket(ENDPOINT);
+ }catch(e){
+  status("Connection error: "+e.message);
+  return;
+ }
+
+ timer=setTimeout(()=>{
+  if(!connected){
+   status("Timed out. Tap Reconnect.");
   }
+ },15000);
 
-  found = {};
-  subscribed = new Set();
-  renderCards();
-  showStatus("Connecting...");
-  document.getElementById("discovery").textContent =
-    "Requesting available symbols...";
-
-  try {
-    ws = new WebSocket(ENDPOINT);
-  } catch(e) {
-    showStatus("Connection error: " + e.message);
-    return;
-  }
-
-  ws.onopen = () => {
-    showStatus("Connected; requesting symbols...");
-    ws.send(JSON.stringify({
-      active_symbols: "brief",
-      req_id: ++requestId
-    }));
-  };
-
-  ws.onmessage = event => {
-    let d;
-    try { d = JSON.parse(event.data); }
-    catch(e) { return; }
-
-    if (d.error) {
-      showStatus("API error: " + d.error.message);
-      return;
-    }
-
-    if (d.msg_type === "active_symbols") {
-      processSymbols(d.active_symbols || []);
-    }
-
-    if (d.msg_type === "tick" && d.tick) {
-      updateTick(d.tick);
-    }
-  };
-
-  ws.onerror = () => showStatus(
-    "Connection failed. Check internet or API availability."
-  );
-
-  ws.onclose = () => showStatus("Disconnected");
-}
-
-function processSymbols(symbols) {
-  const normalized = symbols.map(s => ({
-    ...s,
-    name: String(s.display_name || "").toLowerCase()
+ ws.onopen=()=>{
+  connected=true;
+  clearTimeout(timer);
+  status("Connected. Searching symbols...");
+  ws.send(JSON.stringify({
+   active_symbols:"brief",
+   product_type:"basic",
+   req_id:++requestId
   }));
+ };
 
-  const matches = {
-    v75: s => s.name.includes("volatility 75 index"),
-    v25: s => s.name.includes("volatility 25 index"),
-    v10s: s =>
-      s.name.includes("volatility 10") &&
-      (s.name.includes("(1s)") || s.name.includes("1s"))
-  };
+ ws.onmessage=(event)=>{
+  let d;
+  try{d=JSON.parse(event.data)}catch(e){return}
 
-  targets.forEach(t => {
-    const s = normalized.find(matches[t.key]);
-    if (s) found[t.key] = s;
-  });
-
-  renderCards();
-
-  const report = targets.map(t => {
-    const s = found[t.key];
-    return t.label + ": " +
-      (s ? s.symbol + " (" + s.display_name + ")" : "NOT FOUND");
-  });
-
-  document.getElementById("discovery").innerHTML =
-    report.map(x => "<div>" + x + "</div>").join("");
-
-  const missing = targets.filter(t => !found[t.key]);
-
-  if (missing.length) {
-    const candidates = normalized
-      .filter(s => s.name.includes("volatility"))
-      .map(s => s.display_name + " [" + s.symbol + "]")
-      .slice(0, 40);
-
-    document.getElementById("discovery").innerHTML +=
-      "<p>Other returned volatility symbols:</p>" +
-      candidates.map(x => "<div>" + x + "</div>").join("");
+  if(d.error){
+   status("Deriv error: "+d.error.message);
+   document.getElementById("discovery").textContent=
+    d.error.message;
+   return;
   }
 
-  targets.forEach(t => {
-    const s = found[t.key];
-    if (s && !subscribed.has(s.symbol)) {
-      subscribed.add(s.symbol);
-      ws.send(JSON.stringify({
-        ticks: s.symbol,
-        subscribe: 1,
-        req_id: ++requestId
-      }));
-    }
-  });
+  if(d.msg_type==="active_symbols"){
+   processSymbols(d.active_symbols||[]);
+  }
 
-  showStatus("Symbol search complete; waiting for live ticks...");
+  if(d.msg_type==="tick"&&d.tick){
+   updateTick(d.tick);
+  }
+ };
+
+ ws.onerror=()=>{
+  status("WebSocket error. Check connection and reload.");
+ };
+
+ ws.onclose=()=>{
+  connected=false;
+  status("Disconnected. Tap Reconnect.");
+ };
 }
 
-function updateTick(tick) {
-  const target = targets.find(t =>
-    found[t.key] && found[t.key].symbol === tick.symbol
+function processSymbols(symbols){
+ const norm=symbols.map(s=>({
+  ...s,
+  name:String(s.display_name||"").toLowerCase(),
+  symbol:String(s.symbol||"").toUpperCase()
+ }));
+
+ targets.forEach(t=>{
+  let s=norm.find(x=>
+   t.aliases.includes(x.symbol)
   );
-  if (!target) return;
 
-  document.getElementById("price-" + target.key).textContent =
-    Number(tick.quote).toLocaleString("en-US",
-      {maximumFractionDigits: 8});
+  if(!s){
+   s=norm.find(x=>{
+    if(t.key==="v75")
+     return x.name.includes("volatility 75 index");
+    if(t.key==="v25")
+     return x.name.includes("volatility 25 index");
+    return x.name.includes("volatility 10")&&
+      (x.name.includes("(1s)")||x.name.includes("1s"));
+   });
+  }
 
-  document.getElementById("detail-" + target.key).textContent =
-    "Symbol: " + tick.symbol +
-    " | Updated: " + new Date(tick.epoch * 1000).toLocaleTimeString();
+  if(s) found[t.key]=s;
+ });
 
-  showStatus("Live price stream received");
+ render();
+
+ targets.forEach(t=>{
+  const s=found[t.key];
+  const el=document.getElementById("detail-"+t.key);
+  if(el) el.textContent=s?
+   "Symbol: "+s.symbol+" | Waiting for first tick":
+   "Symbol not matched";
+ });
+
+ const report=targets.map(t=>{
+  const s=found[t.key];
+  return t.label+": "+(s?s.symbol+" FOUND":"NOT FOUND");
+ });
+
+ const discovery=document.getElementById("discovery");
+ discovery.replaceChildren();
+
+ report.forEach(line=>{
+  const p=document.createElement("p");
+  p.textContent=line;
+  discovery.appendChild(p);
+ });
+
+ const candidates=norm.filter(s=>
+  s.name.includes("volatility")||
+  s.symbol.startsWith("1HZ")
+ );
+
+ if(targets.some(t=>!found[t.key])){
+  const title=document.createElement("p");
+  title.textContent="Available volatility symbols:";
+  discovery.appendChild(title);
+
+  candidates.slice(0,60).forEach(s=>{
+   const p=document.createElement("p");
+   p.textContent=s.display_name+" ["+s.symbol+"]";
+   discovery.appendChild(p);
+  });
+ }
+
+ let count=0;
+ targets.forEach(t=>{
+  const s=found[t.key];
+  if(s){
+   ws.send(JSON.stringify({
+    ticks:s.symbol,
+    subscribe:1,
+    req_id:++requestId
+   }));
+   count++;
+  }
+ });
+
+ status(count===3?
+  "All symbols found. Waiting for live prices...":
+  "Found "+count+" of 3 symbols. Check discovery below.");
 }
 
-renderCards();
+function updateTick(tick){
+ const target=targets.find(t=>
+  found[t.key]&&found[t.key].symbol===tick.symbol
+ );
+ if(!target)return;
+
+ document.getElementById("price-"+target.key).textContent=
+  Number(tick.quote).toLocaleString("en-US",
+   {maximumFractionDigits:8});
+
+ document.getElementById("detail-"+target.key).textContent=
+  "Symbol: "+tick.symbol+" | Updated: "+
+  new Date(tick.epoch*1000).toLocaleTimeString();
+
+ status("Live prices received successfully");
+}
+
+render();
 connect();
 </script>
 </body>
-</html>
-
+  </html>
+  
